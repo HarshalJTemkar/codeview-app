@@ -1,0 +1,22 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: codeview-app
+
+codeview:
+  # Absolute or relative path to the target repository. Read-only — never written to.
+  repo-root: ./sample-repo
+  # Where OKF concept files (markdown + YAML frontmatter) are written. This is
+  # the primary knowledge store in this design (Architecture Plan §6/§7/§13).
+  okf-root: ./okf-store
+  # 0 = scale to Runtime.getRuntime().availableProcessors() (confirmed default, §12).
+  # Set to a positive number to override/cap.
+  worker-pool-size: 0
+  max-retries: 3
+  watch-enabled: true
+
+logging:
+  level:
+    com.codeview.app: INFO
