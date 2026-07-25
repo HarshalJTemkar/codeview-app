@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>CodeView — Flow</title>
+    <link rel="stylesheet" th:href="@{/css/theme.css}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+<nav class="nav">
+    <span class="brand"><a th:href="@{/ui}" style="color: inherit; text-decoration: none;">CodeView</a></span>
+    <div>
+        <a th:href="@{/ui/upload}">Upload</a>
+        <a th:href="@{/ui/tree}">Tree</a>
+        <a th:href="@{/ui/flow}">Flow</a>
+        <a th:href="@{/swagger-ui.html}">API docs</a>
+    </div>
+</nav>
+
+<section class="band band-dark">
+    <div class="container">
+        <h2>Dependency flow</h2>
+        <p>
+            One node per class/method chunk, one edge per resolved dependency link — the same
+            deterministic name/path matching the prompt-time filter's link-graph walk uses (Architecture
+            Plan §11), just run across every chunk instead of one hop from a single match.
+        </p>
+        <div id="flow-graph"></div>
+        <div id="flow-empty" class="empty-state" style="display:none;">
+            Nothing indexed yet. Run <code>POST /mcp/code/reindex_all</code> first.
+        </div>
+    </div>
+</section>
+
+<script th:src="@{/js/flow.js}"></script>
+</body>
+</html>

@@ -4,9 +4,17 @@ server:
 spring:
   application:
     name: codeview-app
+  servlet:
+    multipart:
+      # Client-side filtering (upload.js) now keeps non-.java files out of the
+      # request entirely, so these limits are a backstop for legitimately large
+      # source trees rather than the primary defense against oversized uploads.
+      max-file-size: 100MB
+      max-request-size: 1GB
 
 codeview:
-  # Absolute or relative path to the target repository. Read-only — never written to.
+  # Source to index: an existing directory, a .zip archive, or a single .java
+  # file. Auto-detected by SourceResolver. Read-only in every case — never written to.
   repo-root: ./sample-repo
   # Where OKF concept files (markdown + YAML frontmatter) are written. This is
   # the primary knowledge store in this design (Architecture Plan §6/§7/§13).
@@ -20,3 +28,9 @@ codeview:
 logging:
   level:
     com.codeview.app: INFO
+
+# springdoc-openapi defaults: spec at /v3/api-docs, browsable UI at /swagger-ui.html.
+# No security scheme configured — consistent with the no-auth requirement (NFR-1).
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html

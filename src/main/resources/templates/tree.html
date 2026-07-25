@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>CodeView — Tree</title>
+    <link rel="stylesheet" th:href="@{/css/theme.css}">
+</head>
+<body>
+<nav class="nav">
+    <span class="brand"><a th:href="@{/ui}" style="color: inherit; text-decoration: none;">CodeView</a></span>
+    <div>
+        <a th:href="@{/ui/upload}">Upload</a>
+        <a th:href="@{/ui/tree}">Tree</a>
+        <a th:href="@{/ui/flow}">Flow</a>
+        <a th:href="@{/swagger-ui.html}">API docs</a>
+    </div>
+</nav>
+
+<section class="band band-light">
+    <div class="container">
+        <h2>Directory / file / symbol tree</h2>
+        <p>Built from the OKF concept store, not the file system directly — this reflects what's
+            actually been indexed, not what's on disk.</p>
+
+        <div id="tree-container" class="tree"></div>
+        <div id="chunk-panel" class="chunk-panel"></div>
+    </div>
+</section>
+
+<script th:src="@{/js/tree.js}"></script>
+</body>
+</html>

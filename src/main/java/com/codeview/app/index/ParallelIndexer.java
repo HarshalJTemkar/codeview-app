@@ -5,17 +5,17 @@ import com.codeview.app.config.CodeViewProperties;
 import com.codeview.app.model.ChunkRecord;
 import com.codeview.app.model.IndexRunResult;
 import com.codeview.app.okf.OkfWriter;
+import com.codeview.app.source.ResolvedSource;
+import com.codeview.app.source.SourceResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.stream.Stream;
 
 /**
  * First-time (full) parallel index: partitions files across a worker pool
@@ -24,6 +24,10 @@ import java.util.stream.Stream;
  * per-file without stopping other workers; writes are idempotent (hash-keyed
  * OKF file names), so a retried worker can safely re-write without
  * duplicating anything.
+ *
+ * The source location can be a directory, a .zip archive, or a single .java
+ * file — SourceResolver normalizes all three into the same file list before
+ * this class does anything else.
  */
 @Component
 public class ParallelIndexer {
@@ -34,31 +38,45 @@ public class ParallelIndexer {
     private final JavaAstChunker chunker;
     private final OkfWriter okfWriter;
     private final CodeViewProperties props;
+    private final SourceResolver sourceResolver;
 
     public ParallelIndexer(ExecutorService executor, JavaAstChunker chunker,
-                            OkfWriter okfWriter, CodeViewProperties props) {
+                            OkfWriter okfWriter, CodeViewProperties props,
+                            SourceResolver sourceResolver) {
         this.executor = executor;
         this.chunker = chunker;
         this.okfWriter = okfWriter;
         this.props = props;
+        this.sourceResolver = sourceResolver;
     }
 
+    /** Indexes the configured default source (codeview.repo-root). */
     public IndexRunResult indexAll() throws Exception {
-        Path repoRoot = Path.of(props.getRepoRoot());
+        return indexSource(props.getRepoRoot());
+    }
+
+    /**
+     * Indexes an explicitly given source path — folder, .zip, or single
+     * .java file — overriding the configured default for this one run.
+     */
+    public IndexRunResult indexSource(String rawSourcePath) throws Exception {
         IndexRunResult result = new IndexRunResult();
 
-        if (!Files.isDirectory(repoRoot)) {
-            log.warn("Repo root {} does not exist or is not a directory; nothing to index.", repoRoot);
+        ResolvedSource resolved;
+        try {
+            resolved = sourceResolver.resolve(rawSourcePath);
+        } catch (IllegalArgumentException e) {
+            log.warn("Cannot index {}: {}", rawSourcePath, e.getMessage());
+            result.addFailure(rawSourcePath, e.getMessage(), 1);
             return result;
         }
 
-        List<Path> javaFiles;
-        try (Stream<Path> walk = Files.walk(repoRoot)) {
-            javaFiles = walk.filter(p -> p.toString().endsWith(".java")).toList();
-        }
+        log.info("Indexing {} file(s) from {} (source type: {})",
+                resolved.javaFiles().size(), rawSourcePath, resolved.type());
 
-        List<Future<FileOutcome>> futures = javaFiles.stream()
-                .map(file -> executor.submit((Callable<FileOutcome>) () -> indexOneFileWithRetry(repoRoot, file)))
+        List<Future<FileOutcome>> futures = resolved.javaFiles().stream()
+                .map(file -> executor.submit((Callable<FileOutcome>) () ->
+                        indexOneFileWithRetry(resolved.effectiveRoot(), file)))
                 .toList();
 
         for (Future<FileOutcome> future : futures) {
@@ -70,11 +88,15 @@ public class ParallelIndexer {
             }
         }
 
+        if (resolved.temporary()) {
+            sourceResolver.cleanupIfTemporary(resolved);
+        }
+
         return result;
     }
 
-    private FileOutcome indexOneFileWithRetry(Path repoRoot, Path file) {
-        String relativePath = repoRoot.relativize(file).toString().replace('\\', '/');
+    private FileOutcome indexOneFileWithRetry(Path effectiveRoot, Path file) {
+        String relativePath = effectiveRoot.relativize(file).toString().replace('\\', '/');
         int attempts = 0;
         Exception lastError = null;
 
@@ -106,3 +128,4 @@ public class ParallelIndexer {
         }
     }
 }
+

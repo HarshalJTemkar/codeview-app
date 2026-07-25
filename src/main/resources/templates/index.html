@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>CodeView</title>
+    <link rel="stylesheet" th:href="@{/css/theme.css}">
+</head>
+<body>
+<nav class="nav">
+    <span class="brand">CodeView</span>
+    <div>
+        <a th:href="@{/ui/upload}">Upload</a>
+        <a th:href="@{/ui/tree}">Tree</a>
+        <a th:href="@{/ui/flow}">Flow</a>
+        <a th:href="@{/swagger-ui.html}">API docs</a>
+    </div>
+</nav>
+
+<section class="band band-dark">
+    <div class="container">
+        <h1>Read your codebase without reading through it.</h1>
+        <p>
+            A structural map of what you've indexed — the file/symbol tree, and how the pieces call
+            into each other. No embeddings, no ranking model, no LLM call anywhere on this page.
+        </p>
+        <div class="actions">
+            <a class="pill pill-primary" th:href="@{/ui/upload}">Upload a codebase</a>
+            <a class="pill pill-secondary-dark" th:href="@{/ui/tree}">Browse the tree</a>
+            <a class="pill pill-secondary-dark" th:href="@{/ui/flow}">See the dependency flow</a>
+        </div>
+    </div>
+</section>
+
+<section class="band band-light">
+    <div class="container">
+        <h2>What's here</h2>
+        <div class="card" style="margin-bottom: 16px;">
+            <h3>Tree</h3>
+            <p>Directory → file → class → method, lazy-expandable. Click a method or class to read its
+                indexed chunk directly.</p>
+        </div>
+        <div class="card">
+            <h3>Flow</h3>
+            <p>Every resolved dependency link between chunks, as a graph — the same matching logic the
+                prompt-time context filter uses, just drawn for the whole codebase at once.</p>
+        </div>
+    </div>
+</section>
+
+<section class="band band-blue">
+    <div class="container">
+        <h2>Nothing here calls an LLM</h2>
+        <p style="color: rgba(255,255,255,0.85); max-width: 720px;">
+            Everything on this page is deterministic: file walks, hashes, and string/graph matching
+            against the OKF concept store. See <code>/mcp/code/prompt_filter</code> in the API docs for
+            where an LLM actually enters the picture — and it's the caller's LLM, not this app's.
+        </p>
+    </div>
+</section>
+</body>
+</html>
