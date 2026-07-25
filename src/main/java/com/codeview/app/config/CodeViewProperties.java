@@ -9,7 +9,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "codeview")
 public class CodeViewProperties {
 
-    /** Absolute path to the target repository CodeView reads (never writes). */
+    /**
+     * Path to the target source. Accepts three shapes, resolved automatically
+     * by SourceResolver: an existing directory, a .zip archive, or a single
+     * .java file. Never written to — read-only in every case.
+     */
     private String repoRoot = "./sample-repo";
 
     /** Absolute path to the OKF bundle output directory (markdown+YAML concept files). */

@@ -14,6 +14,7 @@ Summary)*, with the constraints and decisions recorded in `docs/Architecture.md`
 
 **In scope for this build:**
 - Java source parsing (AST-based chunking via JavaParser)
+- Accepting a directory, `.zip` archive, or single `.java` file as the source to index
 - Merkle-style content hashing for change detection
 - OKF concept-file generation (markdown + YAML frontmatter)
 - Directory/file/symbol tree construction
@@ -21,6 +22,9 @@ Summary)*, with the constraints and decisions recorded in `docs/Architecture.md`
 - File-watch-triggered incremental re-indexing
 - MCP REST endpoints: search, get_chunk, tree, update_file, reindex_all, prompt_filter
 - Prompt-time context filter (structural match → keyword fallback → link-graph walk)
+- A Thymeleaf-based developer UI: tree visualization and dependency flow graph
+- Browser upload of a `.zip` or a folder, indexed via the same pipeline as any other source
+- OpenAPI/Swagger documentation, generated from the REST controller's own annotations
 
 **Explicitly out of scope for this build** (see README "What's deliberately not in this build"):
 - Authentication/authorization of any kind
@@ -28,13 +32,16 @@ Summary)*, with the constraints and decisions recorded in `docs/Architecture.md`
 - Postgres or any other secondary index
 - Vector embeddings, vector database, or any LLM call inside CodeView itself
 - Applying patches/diffs to source (CodeView only ever reads and re-reads files)
-- A UI client (only the REST API this UI would call)
+- Editing capability in the UI — the tree/flow pages are read-only views; there is no
+  in-browser code editor, no chunk-editing form, and no way to trigger a write from the UI
 
 ## 3. Functional Requirements
 
 | ID | Requirement |
 |---|---|
 | FR-1 | The system SHALL parse `.java` files into an AST and emit one chunk per class/interface and one chunk per method. |
+| FR-1a | The system SHALL accept a source location as a directory, a `.zip` archive, or a single `.java` file, and SHALL resolve each to the correct set of files to index without requiring different configuration or code paths from the caller. |
+| FR-1b | When the source is a `.zip` archive, the system SHALL extract it to a temporary location for reading and SHALL reject any archive entry whose path would resolve outside that temporary location (zip-slip protection), skipping that entry rather than failing the whole extraction. |
 | FR-2 | The system SHALL compute a SHA-256 content hash for every chunk. |
 | FR-3 | The system SHALL write each chunk as one OKF concept file (markdown + YAML frontmatter) containing: `chunk_id`, `file_path`, `language`, `name`, `start_line`, `end_line`, `tags`, `dependencies`, `hash`, `last_modified`, and the chunk's source text. |
 | FR-4 | The system SHALL NOT write, modify, or delete any file inside the target repository under any circumstance. |
@@ -48,6 +55,12 @@ Summary)*, with the constraints and decisions recorded in `docs/Architecture.md`
 | FR-12 | The system SHALL expose an endpoint that re-reads and re-chunks a single named file from disk; this endpoint SHALL NOT accept or apply a patch/diff. |
 | FR-13 | The system SHALL expose a prompt-filter endpoint that: (a) attempts structural matching of explicit symbol names/paths in the prompt; (b) falls back to keyword matching against chunk name/path/tags if structural matching finds nothing; (c) performs a one-hop walk of dependency links from whatever matched; (d) returns matched and linked chunks, or an explicit `no_match: true` flag with empty results if nothing matched at any step. |
 | FR-14 | The prompt-filter endpoint SHALL NOT call an LLM or any other model at any step; it returns context for the caller to use in its own subsequent LLM call. |
+| FR-15 | The system SHALL provide a browsable tree page rendering the directory → file → class → method structure, lazy-expandable per node, with the ability to view a symbol's full indexed chunk content. |
+| FR-16 | The system SHALL provide a dependency flow visualization showing every resolved dependency link between chunks as a graph, using the same deterministic matching logic as the prompt-filter's link-graph walk (FR-13c), applied across the whole indexed set rather than one hop from a single match. |
+| FR-17 | The system SHALL expose OpenAPI-compliant API documentation, generated from the REST controller's own annotations, browsable via a Swagger UI. |
+| FR-18 | The system SHALL accept a `.zip` archive uploaded from the browser and index it via the same code path as any other `.zip` source. |
+| FR-19 | The system SHALL accept a folder uploaded from the browser (as a set of individual files, each carrying its relative path), reconstruct it into an indexable directory preserving that structure, index only the `.java` files within it, and reject any relative path that would resolve outside the reconstruction directory. |
+| FR-20 | The system SHALL clean up any temporary files or directories it creates to service an upload, whether the upload succeeds or fails. |
 
 ## 4. Non-Functional Requirements
 
@@ -70,3 +83,6 @@ NFR-5 → §12 (confirmed).
 
 - **Deployment target** (local-only vs. shared, vs. perimeter-restricted) — not decided.
   NFR-1 (no auth) is only as safe as this decision, whenever it's made.
+- **Watching a `.zip`-configured source for changes** — not supported. The file watcher (FR-8)
+  only applies to a directory-configured source; a `.zip` or single-file source must be
+  re-indexed manually via `/mcp/code/reindex_all` after it changes.

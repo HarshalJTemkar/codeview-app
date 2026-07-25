@@ -27,62 +27,34 @@ public class TreeService {
     }
 
     public Map<String, TreeNode> buildTree() throws IOException {
-
         List<ChunkRecord> chunks = okfReader.readAll();
         Map<String, TreeNode> nodes = new LinkedHashMap<>();
 
-        // Create Root
-        TreeNode root = new TreeNode("root", "/", "directory");
-        nodes.put("root", root);
+        TreeNode root = nodes.computeIfAbsent("root", id -> new TreeNode("root", "/", "directory"));
 
         for (ChunkRecord chunk : chunks) {
-
             String[] parts = chunk.filePath().split("/");
-
             String parentId = "root";
             StringBuilder pathSoFar = new StringBuilder();
 
             for (int i = 0; i < parts.length; i++) {
-
-                if (i > 0) {
-                    pathSoFar.append("/");
-                }
-                pathSoFar.append(parts[i]);
-
-                String nodeId = "dir:" + pathSoFar.toString();
+                pathSoFar.append(i == 0 ? "" : "/").append(parts[i]);
+                String nodeId = "dir:" + pathSoFar;
                 boolean isFile = (i == parts.length - 1);
                 String type = isFile ? "file" : "directory";
 
-                // Avoid computeIfAbsent()
-                TreeNode node = nodes.get(nodeId);
-                if (node == null) {
-                    node = new TreeNode(nodeId, parts[i], type);
-                    nodes.put(nodeId, node);
-                }
-
+                TreeNode node = nodes.computeIfAbsent(nodeId, id -> new TreeNode(id, parts[i], type));
                 TreeNode parent = nodes.get(parentId);
                 if (!parent.getChildren().contains(nodeId)) {
                     parent.getChildren().add(nodeId);
                 }
-
                 parentId = nodeId;
 
                 if (isFile) {
-
                     String symbolNodeId = nodeId + "#" + chunk.name();
-
-                    TreeNode symbolNode = nodes.get(symbolNodeId);
-                    if (symbolNode == null) {
-                        symbolNode = new TreeNode(
-                                symbolNodeId,
-                                chunk.name(),
-                                chunk.astNode()
-                        );
-                        nodes.put(symbolNodeId, symbolNode);
-                    }
-
+                    TreeNode symbolNode = nodes.computeIfAbsent(symbolNodeId,
+                            id -> new TreeNode(id, chunk.name(), chunk.astNode()));
                     symbolNode.getChunkIds().add(chunk.chunkId());
-
                     if (!node.getChildren().contains(symbolNodeId)) {
                         node.getChildren().add(symbolNodeId);
                     }

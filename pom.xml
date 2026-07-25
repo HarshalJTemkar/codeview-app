@@ -27,12 +27,27 @@
         <java.version>21</java.version>
         <javaparser.version>3.28.2</javaparser.version>
         <snakeyaml.version>2.2</snakeyaml.version>
+        <springdoc.version>3.0.3</springdoc.version>
     </properties>
 
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Developer-facing UI: tree visualization + dependency flow graph -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-thymeleaf</artifactId>
+        </dependency>
+
+        <!-- OpenAPI/Swagger docs for the MCP REST endpoints, auto-generated from
+             the existing @RestController — no extra spec file to maintain by hand. -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
         </dependency>
 
         <!-- AST parsing for Java source. Used instead of Tree-sitter: Tree-sitter has

@@ -3,6 +3,7 @@ package com.codeview.app.mcp;
 import com.codeview.app.config.CodeViewProperties;
 import com.codeview.app.index.IncrementalIndexService;
 import com.codeview.app.index.ParallelIndexer;
+import com.codeview.app.mcp.dto.IndexSourceRequest;
 import com.codeview.app.mcp.dto.PromptFilterRequest;
 import com.codeview.app.mcp.dto.SearchRequest;
 import com.codeview.app.mcp.dto.UpdateFileRequest;
@@ -13,6 +14,8 @@ import com.codeview.app.model.TreeNode;
 import com.codeview.app.okf.OkfReader;
 import com.codeview.app.promptfilter.PromptFilterService;
 import com.codeview.app.tree.TreeService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.web.bind.annotation.*;
 
 import java.nio.file.Path;
@@ -29,9 +32,13 @@ import java.util.stream.Collectors;
  * "Plugged to any application": these are plain HTTP+JSON endpoints, so any
  * host that can make an HTTP call — editor plugin, agent, CI job, script —
  * can use this without CodeView knowing anything about that caller.
+ *
+ * Full interactive docs: /swagger-ui.html — generated from these annotations,
+ * not maintained as a separate hand-written spec.
  */
 @RestController
 @RequestMapping("/mcp/code")
+@Tag(name = "MCP code intelligence", description = "Structural search, chunk/tree access, indexing, and the prompt-time context filter — no auth, no LLM calls except inside prompt_filter's caller-side use of the returned context")
 public class McpController {
 
     private final OkfReader okfReader;
@@ -53,6 +60,7 @@ public class McpController {
     }
 
     /** Structural/keyword lookup over OKF concept files. No ranking/embedding step. */
+    @Operation(summary = "Search", description = "Matches query against chunk name, file path, and tags. No ranking function, embedding, or model call — plain string matching, capped at topK results.")
     @PostMapping("/search")
     public Map<String, Object> search(@RequestBody SearchRequest request) throws Exception {
         List<ChunkRecord> all = okfReader.readAll();
@@ -75,6 +83,7 @@ public class McpController {
     }
 
     /** Fetch a single chunk (OKF concept) by ID. */
+    @Operation(summary = "Get chunk", description = "Fetches one chunk's full content (source text + metadata) by its chunk_id.")
     @GetMapping("/get_chunk/{chunkId}")
     public ChunkRecord getChunk(@PathVariable String chunkId) throws Exception {
         return okfReader.readAll().stream()
@@ -84,6 +93,7 @@ public class McpController {
     }
 
     /** Serialized tree/subtree for the lazy-loaded UI. */
+    @Operation(summary = "Get tree", description = "Directory -> file -> class -> method tree, derived from the current OKF concept files.")
     @GetMapping("/tree")
     public Map<String, TreeNode> tree() throws Exception {
         return treeService.buildTree();
@@ -93,6 +103,7 @@ public class McpController {
      * Re-read and re-chunk one file from disk. Never applies a patch — see
      * the DTO's own doc comment for why that field doesn't exist here.
      */
+    @Operation(summary = "Update (re-index) one file", description = "Re-reads and re-chunks a single file from disk. Never accepts or applies a patch/diff — read-only against the source in every case.")
     @PostMapping("/update_file")
     public IndexRunResult updateFile(@RequestBody UpdateFileRequest request) {
         Path repoRoot = Path.of(props.getRepoRoot());
@@ -100,10 +111,19 @@ public class McpController {
         return incrementalIndexService.reindexFile(repoRoot, file, request.filePath());
     }
 
-    /** Kicks off a full parallel first-time index (Architecture Plan §12). */
+    /**
+     * Kicks off a full parallel index (Architecture Plan §12). Body is
+     * optional: with no body (or an empty JSON object), indexes
+     * codeview.repo-root. With {"sourcePath": "..."}, indexes that path
+     * instead — a directory, a .zip archive, or a single .java file.
+     */
+    @Operation(summary = "Full re-index", description = "Parallel worker-pool index of a directory, .zip archive, or single .java file. Omit the body to use the configured codeview.repo-root.")
     @PostMapping("/reindex_all")
-    public IndexRunResult reindexAll() throws Exception {
-        return parallelIndexer.indexAll();
+    public IndexRunResult reindexAll(@RequestBody(required = false) IndexSourceRequest request) throws Exception {
+        String sourcePath = (request != null && request.sourcePath() != null)
+                ? request.sourcePath()
+                : props.getRepoRoot();
+        return parallelIndexer.indexSource(sourcePath);
     }
 
     /**
@@ -112,6 +132,7 @@ public class McpController {
      * the caller to attach before its own LLM call. CodeView does not call
      * an LLM here or anywhere else in this endpoint.
      */
+    @Operation(summary = "Prompt-time context filter", description = "Structural match -> keyword fallback -> one-hop link-graph walk. Returns matched/linked chunks, or noMatch:true with empty arrays. This endpoint never calls an LLM — the caller attaches the result to its own prompt.")
     @PostMapping("/prompt_filter")
     public PromptFilterResult promptFilter(@RequestBody PromptFilterRequest request) throws Exception {
         return promptFilterService.filter(request.prompt());
