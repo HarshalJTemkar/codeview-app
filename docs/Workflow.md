@@ -246,3 +246,52 @@ Both paths converge on the exact same `ParallelIndexer.indexSource()` call as
 `POST /mcp/code/reindex_all` (workflow 1) — uploading is a different way of *supplying* a source,
 not a different indexing implementation.
 
+
+## 7. Project name derivation (runs alongside workflow 0/1/6, before any OKF write)
+
+```
+                    ┌─── indexSource(rawPath) / reindex_all ───┐
+                    │   project = ProjectNameResolver          │
+                    │     .fromSourcePath(rawPath)              │
+                    │     (last path segment, .zip stripped)   │
+                    └───────────────────────────────────────────┘
+                    ┌─── UploadService.indexUploadedZip ───────┐
+                    │   project = ProjectNameResolver          │
+                    │     .fromUploadedZipFilename(             │
+                    │       browser's ORIGINAL filename)       │
+                    │   (NOT the server's random temp filename) │
+                    └───────────────────────────────────────────┘
+                    ┌─── UploadService.indexUploadedFolder ────┐
+                    │   project = ProjectNameResolver          │
+                    │     .fromFolderUploadRelativePaths(        │
+                    │       first uploaded file's relative path) │
+                    │   (webkitdirectory prefixes every file    │
+                    │    with the folder the user selected)     │
+                    └───────────────────────────────────────────┘
+                                      │
+                                      ▼
+                         ProjectNameResolver.sanitize()
+                    (non-alphanumeric → dash, strip leading dots,
+                     cap length, fall back to a timestamp name
+                     if nothing usable survives sanitizing)
+                                      │
+                                      ▼
+                  Every OkfWriter.write(chunk, project) call for
+                  this run uses this same project name — so every
+                  chunk from one indexing run lands in exactly one
+                  project subdirectory, never split across two.
+                                      │
+                                      ▼
+                  ProjectStore.resolveProjectDir(okfRoot, project)
+                  — independent re-check that the resolved path
+                  doesn't escape okfRoot, even though sanitize()
+                  should already prevent that (defense-in-depth,
+                  same pattern as the .zip zip-slip guard).
+```
+
+**Why reads need an explicit `project` parameter (not a "current project" server remembers):** two
+browser tabs or two agents could be indexing or reading different projects at the same time — a
+server-side "current project" would be shared mutable state that races between them. Every read
+endpoint (`search`, `get_chunk`, `tree`, `/ui/api/tree`, `/ui/api/flow`, `prompt_filter`) takes
+`project` explicitly instead; `GET /mcp/code/projects` (and `/ui/api/projects` for the UI) is how a
+caller discovers what's actually available before picking one.

@@ -8,6 +8,9 @@ package com.codeview.app.mcp.dto;
  * CodeView never applies a patch to source — accepting a diff field here
  * would silently reopen the write path the source doc's design allowed and
  * you asked to close.
+ *
+ * @param project optional; if omitted, defaults to the project name derived
+ *                from codeview.repo-root, matching what reindex_all would use for that same root
  */
-public record UpdateFileRequest(String filePath) {
+public record UpdateFileRequest(String filePath, String project) {
 }

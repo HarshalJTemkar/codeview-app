@@ -25,6 +25,10 @@
             deterministic name/path matching the prompt-time filter's link-graph walk uses (Architecture
             Plan §11), just run across every chunk instead of one hop from a single match.
         </p>
+        <div style="margin-bottom: 16px;">
+            <label for="project-select" style="font-weight: 500; margin-right: 8px; color: var(--on-dark);">Project:</label>
+            <select id="project-select"></select>
+        </div>
         <div id="flow-graph"></div>
         <div id="flow-empty" class="empty-state" style="display:none;">
             Nothing indexed yet. Run <code>POST /mcp/code/reindex_all</code> first.
@@ -32,6 +36,7 @@
     </div>
 </section>
 
+<script th:src="@{/js/project-picker.js}"></script>
 <script th:src="@{/js/flow.js}"></script>
 </body>
 </html>

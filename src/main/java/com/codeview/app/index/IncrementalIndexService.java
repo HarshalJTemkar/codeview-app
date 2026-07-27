@@ -20,6 +20,11 @@ import java.util.List;
  * actually changed. Unchanged files are skipped entirely — this is the
  * "walking only changed branches" behavior from the source doc, applied at
  * file granularity.
+ *
+ * <p><b>Project-scoped (this build):</b> every call operates within one
+ * named project, matching {@link ParallelIndexer}'s scoping — a file update
+ * for project A can never accidentally touch project B's hash state or OKF
+ * files, even if both projects happen to share a relative file path.
  */
 @Service
 public class IncrementalIndexService {
@@ -43,29 +48,36 @@ public class IncrementalIndexService {
      * @param repoRoot     root of the target repository (read-only)
      * @param file         absolute path of the changed file
      * @param relativePath path relative to repoRoot, used as the chunk's file_path
+     * @param project      which project's OKF store and hash state this file belongs to
      */
-    public IndexRunResult reindexFile(Path repoRoot, Path file, String relativePath) {
+    public IndexRunResult reindexFile(Path repoRoot, Path file, String relativePath, String project) {
         IndexRunResult result = new IndexRunResult();
-        try {
-            String content = Files.readString(file);
-            String newHash = hasher.hashContent(content);
+        result.setProject(project);
 
-            if (!hashStore.hasChanged(relativePath, newHash)) {
-                log.debug("File {} unchanged (hash match) — skipping re-chunk.", relativePath);
+        try {
+            String currentHash = hasher.hashContent(Files.readString(file));
+
+            if (!hashStore.hasChanged(project, relativePath, currentHash)) {
+                log.debug("File {} (project '{}') unchanged (hash match) — skipping re-chunk.", relativePath, project);
                 result.addSuccess(relativePath, 0);
                 return result;
             }
-
-            List<ChunkRecord> chunks = chunker.chunk(file, relativePath);
-            for (ChunkRecord chunk : chunks) {
-                okfWriter.write(chunk);
-            }
-            hashStore.update(relativePath, newHash);
-            result.addSuccess(relativePath, chunks.size());
+            reindexChangedFile(file, relativePath, project, currentHash, result);
         } catch (Exception e) {
-            log.warn("Incremental re-index failed for {}: {}", relativePath, e.getMessage());
+            log.warn("Incremental re-index failed for {} (project '{}'): {}", relativePath, project, e.getMessage());
             result.addFailure(relativePath, e.getMessage(), 1);
         }
         return result;
+    }
+
+    /** Re-chunks a file already confirmed to have changed, writes its new chunks, and records the already-computed new hash. */
+    private void reindexChangedFile(Path file, String relativePath, String project, String newHash,
+                                     IndexRunResult result) throws Exception {
+        List<ChunkRecord> chunks = chunker.chunk(file, relativePath);
+        for (ChunkRecord chunk : chunks) {
+            okfWriter.write(chunk, project);
+        }
+        hashStore.update(project, relativePath, newHash);
+        result.addSuccess(relativePath, chunks.size());
     }
 }

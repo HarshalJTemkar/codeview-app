@@ -22,11 +22,17 @@
         <p>Built from the OKF concept store, not the file system directly — this reflects what's
             actually been indexed, not what's on disk.</p>
 
+        <div style="margin-bottom: 16px;">
+            <label for="project-select" style="font-weight: 500; margin-right: 8px;">Project:</label>
+            <select id="project-select"></select>
+        </div>
+
         <div id="tree-container" class="tree"></div>
         <div id="chunk-panel" class="chunk-panel"></div>
     </div>
 </section>
 
+<script th:src="@{/js/project-picker.js}"></script>
 <script th:src="@{/js/tree.js}"></script>
 </body>
 </html>

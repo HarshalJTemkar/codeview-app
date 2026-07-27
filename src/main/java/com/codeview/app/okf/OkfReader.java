@@ -1,6 +1,8 @@
 package com.codeview.app.okf;
 
 import com.codeview.app.model.ChunkRecord;
+import com.codeview.app.project.ProjectStore;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.yaml.snakeyaml.Yaml;
@@ -12,6 +14,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -21,6 +24,11 @@ import java.util.stream.Stream;
  * "retrieval" mechanism in this design — no embeddings, no vector search,
  * just parsing frontmatter and matching structured fields (Architecture Plan
  * §7 and §11).
+ *
+ * <p><b>Project-scoped (this build):</b> {@link #readAll} only ever reads
+ * one project's subdirectory under the OKF root, never the whole root — see
+ * {@link ProjectStore}. {@link #listProjects} is how a caller discovers what
+ * project names actually exist, for a project picker or a default choice.
  */
 @Component
 public class OkfReader {
@@ -29,18 +37,28 @@ public class OkfReader {
             Pattern.DOTALL);
 
     private final Path okfRoot;
+    private final ProjectStore projectStore;
 
-    @SuppressWarnings("unchecked")
-    public OkfReader(@Value("${codeview.okf-root:./okf-store}") String okfRoot) {
+    @Autowired
+    public OkfReader(@Value("${codeview.okf-root:./okf-store}") String okfRoot, ProjectStore projectStore) {
         this.okfRoot = Paths.get(okfRoot);
+        this.projectStore = projectStore;
     }
 
-    public List<ChunkRecord> readAll() throws IOException {
-        List<ChunkRecord> result = new ArrayList<>();
-        if (!Files.isDirectory(okfRoot)) {
-            return result;
+    /** Convenience constructor for tests/manual construction outside Spring, where a ProjectStore bean isn't wired. */
+    public OkfReader(String okfRoot) {
+        this(okfRoot, new ProjectStore());
+    }
+
+    /** Reads every chunk in one project's OKF store. Empty list if the project doesn't exist (not yet indexed). */
+    public List<ChunkRecord> readAll(String project) throws IOException {
+        Path projectDir = projectStore.resolveProjectDir(okfRoot, project);
+        if (!Files.isDirectory(projectDir)) {
+            return List.of();
         }
-        try (Stream<Path> files = Files.list(okfRoot)) {
+
+        List<ChunkRecord> result = new ArrayList<>();
+        try (Stream<Path> files = Files.list(projectDir)) {
             for (Path f : files.filter(p -> p.toString().endsWith(".md")).toList()) {
                 readOne(f).ifPresent(result::add);
             }
@@ -48,42 +66,45 @@ public class OkfReader {
         return result;
     }
 
-    @SuppressWarnings("unchecked")
-    public java.util.Optional<ChunkRecord> readOne(Path file) throws IOException {
-        String content = Files.readString(file);
-        Matcher m = FRONTMATTER.matcher(content);
-        if (!m.matches()) {
-            return java.util.Optional.empty();
-        }
-        String yamlBlock = m.group(1);
-        String body = m.group(2);
-
-        Yaml yaml = new Yaml();
-        Map<String, Object> fm = yaml.load(yamlBlock);
-
-        List<String> tags = (List<String>) fm.getOrDefault("tags", List.of());
-        List<String> deps = (List<String>) fm.getOrDefault("dependencies", List.of());
-
-        ChunkRecord record = new ChunkRecord(
-                String.valueOf(fm.get("chunk_id")),
-                String.valueOf(fm.get("file_path")),
-                String.valueOf(fm.get("language")),
-                asInt(fm.get("start_line")),
-                asInt(fm.get("end_line")),
-                String.valueOf(fm.get("type")),
-                String.valueOf(fm.get("name")),
-                deps,
-                tags,
-                body,
-                String.valueOf(fm.get("hash")),
-                String.valueOf(fm.get("last_modified"))
-        );
-        return java.util.Optional.of(record);
+    /** Every project name currently indexed under the OKF root — for a UI project picker or a "pick a default" fallback. */
+    public List<String> listProjects() throws IOException {
+        return projectStore.listProjects(okfRoot);
     }
 
-    private int asInt(Object o) {
-        if (o instanceof Integer i) return i;
-        if (o == null) return 0;
-        return Integer.parseInt(o.toString());
+    /** Parses one concept file's frontmatter + body back into a ChunkRecord. Empty if the file doesn't match the expected shape. */
+    @SuppressWarnings("unchecked")
+    public Optional<ChunkRecord> readOne(Path file) throws IOException {
+        String content = Files.readString(file);
+        Matcher matcher = FRONTMATTER.matcher(content);
+        if (!matcher.matches()) {
+            return Optional.empty();
+        }
+
+        Map<String, Object> frontmatter = new Yaml().load(matcher.group(1));
+        String body = matcher.group(2);
+
+        List<String> tags = (List<String>) frontmatter.getOrDefault("tags", List.of());
+        List<String> dependencies = (List<String>) frontmatter.getOrDefault("dependencies", List.of());
+
+        return Optional.of(ChunkRecord.builder()
+                .chunkId(String.valueOf(frontmatter.get("chunk_id")))
+                .filePath(String.valueOf(frontmatter.get("file_path")))
+                .language(String.valueOf(frontmatter.get("language")))
+                .lines(asInt(frontmatter.get("start_line")), asInt(frontmatter.get("end_line")))
+                .astNode(String.valueOf(frontmatter.get("type")))
+                .name(String.valueOf(frontmatter.get("name")))
+                .dependencies(dependencies)
+                .tags(tags)
+                .text(body)
+                .hash(String.valueOf(frontmatter.get("hash")))
+                .lastModified(String.valueOf(frontmatter.get("last_modified")))
+                .build());
+    }
+
+    private int asInt(Object value) {
+        if (value instanceof Integer i) {
+            return i;
+        }
+        return value == null ? 0 : Integer.parseInt(value.toString());
     }
 }

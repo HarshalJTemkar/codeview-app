@@ -1,6 +1,8 @@
 package com.codeview.app.okf;
 
 import com.codeview.app.model.ChunkRecord;
+import com.codeview.app.project.ProjectStore;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.yaml.snakeyaml.DumperOptions;
@@ -21,7 +23,12 @@ import java.util.Map;
  * once at index time and read directly at query/prompt-filter time, with no
  * embedding model or vector index involved anywhere.
  *
- * File naming is deterministic (by chunk_id) so re-generating an unchanged
+ * <p><b>Project-scoped (this build):</b> every write goes under {@code
+ * okfRoot/<project>/}, not the flat okfRoot directly — this is what keeps
+ * multiple indexed projects from mixing their chunks together. See {@link
+ * ProjectStore} for how the project subdirectory is resolved.
+ *
+ * <p>File naming is deterministic (by chunk_id) so re-generating an unchanged
  * chunk produces byte-identical output — this is what makes regeneration
  * idempotent under the Merkle-diff re-index in §5.
  */
@@ -29,14 +36,39 @@ import java.util.Map;
 public class OkfWriter {
 
     private final Path okfRoot;
+    private final ProjectStore projectStore;
 
-    public OkfWriter(@Value("${codeview.okf-root:./okf-store}") String okfRoot) {
+    @Autowired
+    public OkfWriter(@Value("${codeview.okf-root:./okf-store}") String okfRoot, ProjectStore projectStore) {
         this.okfRoot = Paths.get(okfRoot);
+        this.projectStore = projectStore;
     }
 
-    public Path write(ChunkRecord chunk) throws IOException {
-        Files.createDirectories(okfRoot);
+    /** Convenience constructor for tests/manual construction outside Spring, where a ProjectStore bean isn't wired. */
+    public OkfWriter(String okfRoot) {
+        this(okfRoot, new ProjectStore());
+    }
 
+    /** Writes one chunk's concept file under {@code okfRoot/<project>/<chunkId>.md}, creating the project directory if needed. */
+    public Path write(ChunkRecord chunk, String project) throws IOException {
+        Path projectDir = projectStore.resolveProjectDir(okfRoot, project);
+        Files.createDirectories(projectDir);
+
+        String content = renderConceptFile(chunk);
+        Path outFile = projectDir.resolve(chunk.chunkId() + ".md");
+        Files.writeString(outFile, content);
+        return outFile;
+    }
+
+    /** Renders a chunk into its full OKF concept-file text: a YAML frontmatter block followed by a fenced code body. */
+    private String renderConceptFile(ChunkRecord chunk) {
+        Map<String, Object> frontmatter = buildFrontmatter(chunk);
+        String yamlBlock = dumpYaml(frontmatter);
+        return "---\n" + yamlBlock + "---\n\n```" + chunk.language() + "\n" + chunk.text() + "\n```\n";
+    }
+
+    /** Assembles the YAML frontmatter fields for one chunk, in the fixed field order the source schema specifies. */
+    private Map<String, Object> buildFrontmatter(ChunkRecord chunk) {
         Map<String, Object> frontmatter = new LinkedHashMap<>();
         frontmatter.put("type", chunk.astNode());
         frontmatter.put("chunk_id", chunk.chunkId());
@@ -49,18 +81,13 @@ public class OkfWriter {
         frontmatter.put("dependencies", chunk.dependencies());
         frontmatter.put("hash", chunk.hash());
         frontmatter.put("last_modified", chunk.lastModified());
+        return frontmatter;
+    }
 
+    private String dumpYaml(Map<String, Object> frontmatter) {
         DumperOptions options = new DumperOptions();
         options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
-        Yaml yaml = new Yaml(options);
-        String yamlBlock = yaml.dump(frontmatter);
-
-        String content = "---\n" + yamlBlock + "---\n\n```" + chunk.language() + "\n"
-                + chunk.text() + "\n```\n";
-
-        Path outFile = okfRoot.resolve(chunk.chunkId() + ".md");
-        Files.writeString(outFile, content);
-        return outFile;
+        return new Yaml(options).dump(frontmatter);
     }
 
     public Path getOkfRoot() {

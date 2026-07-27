@@ -1,21 +1,34 @@
 (function () {
   const container = document.getElementById('tree-container');
   const panel = document.getElementById('chunk-panel');
+  let currentProject = null;
 
-  fetch('/ui/api/tree')
-    .then((res) => res.json())
-    .then((nodes) => {
-      if (!nodes || !nodes.root) {
-        container.innerHTML = '<div class="empty-state">Nothing indexed yet. Run POST /mcp/code/reindex_all first.</div>';
-        return;
-      }
-      const ul = document.createElement('ul');
-      ul.appendChild(renderNode('root', nodes));
-      container.appendChild(ul);
-    })
-    .catch((err) => {
-      container.innerHTML = '<div class="empty-state">Could not load the tree: ' + err + '</div>';
-    });
+  initProjectPicker(function (project) {
+    currentProject = project;
+    loadTree(project);
+  });
+
+  function loadTree(project) {
+    if (!project) {
+      container.innerHTML = '<div class="empty-state">No project selected. Upload something first: /ui/upload</div>';
+      return;
+    }
+    fetch('/ui/api/tree?project=' + encodeURIComponent(project))
+      .then((res) => res.json())
+      .then((nodes) => {
+        if (!nodes || !nodes.root) {
+          container.innerHTML = '<div class="empty-state">Nothing indexed yet for this project.</div>';
+          return;
+        }
+        container.innerHTML = '';
+        const ul = document.createElement('ul');
+        ul.appendChild(renderNode('root', nodes));
+        container.appendChild(ul);
+      })
+      .catch((err) => {
+        container.innerHTML = '<div class="empty-state">Could not load the tree: ' + err + '</div>';
+      });
+  }
 
   function renderNode(nodeId, nodes) {
     const node = nodes[nodeId];
@@ -50,7 +63,7 @@
   }
 
   function loadChunk(chunkId) {
-    fetch('/mcp/code/get_chunk/' + encodeURIComponent(chunkId))
+    fetch('/mcp/code/get_chunk/' + encodeURIComponent(chunkId) + '?project=' + encodeURIComponent(currentProject))
       .then((res) => {
         if (!res.ok) throw new Error('chunk not found');
         return res.json();

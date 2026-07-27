@@ -89,10 +89,10 @@ class ChunkerOkfPipelineTest {
 
         List<ChunkRecord> chunks = chunker.chunk(sampleFile, "com/example/Simple.java");
         for (ChunkRecord chunk : chunks) {
-            writer.write(chunk);
+            writer.write(chunk, "test-project");
         }
 
-        List<ChunkRecord> readBack = reader.readAll();
+        List<ChunkRecord> readBack = reader.readAll("test-project");
         assertEquals(chunks.size(), readBack.size());
         assertTrue(readBack.stream().anyMatch(c -> c.name().equals("greet")));
     }

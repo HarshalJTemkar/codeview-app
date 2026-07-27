@@ -24,6 +24,7 @@ Summary)*, with the constraints and decisions recorded in `docs/Architecture.md`
 - Prompt-time context filter (structural match → keyword fallback → link-graph walk)
 - A Thymeleaf-based developer UI: tree visualization and dependency flow graph
 - Browser upload of a `.zip` or a folder, indexed via the same pipeline as any other source
+- Per-project isolation: multiple indexed sources kept in separate OKF subdirectories, never mixed
 - OpenAPI/Swagger documentation, generated from the REST controller's own annotations
 
 **Explicitly out of scope for this build** (see README "What's deliberately not in this build"):
@@ -61,6 +62,9 @@ Summary)*, with the constraints and decisions recorded in `docs/Architecture.md`
 | FR-18 | The system SHALL accept a `.zip` archive uploaded from the browser and index it via the same code path as any other `.zip` source. |
 | FR-19 | The system SHALL accept a folder uploaded from the browser (as a set of individual files, each carrying its relative path), reconstruct it into an indexable directory preserving that structure, index only the `.java` files within it, and reject any relative path that would resolve outside the reconstruction directory. |
 | FR-20 | The system SHALL clean up any temporary files or directories it creates to service an upload, whether the upload succeeds or fails. |
+| FR-21 | The system SHALL keep multiple indexed sources fully isolated from one another under a per-project subdirectory of the OKF root, derived automatically from the source's name (zip filename, folder name, or path segment) — two projects with the same relative file path SHALL NOT collide or overwrite each other's data. |
+| FR-22 | Every read endpoint (search, get_chunk, tree, flow, prompt_filter) SHALL require an explicit project name and SHALL only return data from that project's OKF subdirectory — never merged across projects. |
+| FR-23 | The system SHALL expose an endpoint listing every currently-indexed project's name, for a caller to discover what's available before choosing one. |
 
 ## 4. Non-Functional Requirements
 

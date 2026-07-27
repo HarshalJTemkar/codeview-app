@@ -5,7 +5,9 @@ import com.codeview.app.config.CodeViewProperties;
 import com.codeview.app.hash.MerkleHasher;
 import com.codeview.app.index.ParallelIndexer;
 import com.codeview.app.model.IndexRunResult;
+import com.codeview.app.okf.OkfReader;
 import com.codeview.app.okf.OkfWriter;
+import com.codeview.app.project.ProjectNameResolver;
 import com.codeview.app.source.SourceResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,6 +28,7 @@ class UploadServiceTest {
     Path tempDir;
 
     private UploadService uploadService;
+    private OkfReader okfReader;
 
     @BeforeEach
     void setUp() {
@@ -36,39 +39,61 @@ class UploadServiceTest {
         MerkleHasher hasher = new MerkleHasher();
         JavaAstChunker chunker = new JavaAstChunker(hasher);
         OkfWriter okfWriter = new OkfWriter(props.getOkfRoot());
+        okfReader = new OkfReader(props.getOkfRoot());
         SourceResolver sourceResolver = new SourceResolver();
+        ProjectNameResolver projectNameResolver = new ProjectNameResolver();
         ExecutorService executor = Executors.newFixedThreadPool(2);
 
-        ParallelIndexer parallelIndexer = new ParallelIndexer(executor, chunker, okfWriter, props, sourceResolver);
-        uploadService = new UploadService(parallelIndexer, sourceResolver);
+        ParallelIndexer parallelIndexer = new ParallelIndexer(executor, chunker, okfWriter, props,
+                sourceResolver, projectNameResolver);
+        uploadService = new UploadService(parallelIndexer, sourceResolver, projectNameResolver);
     }
 
     @Test
-    void indexesUploadedZip() throws Exception {
+    void indexesUploadedZipIntoAProjectNamedAfterTheOriginalFilename() throws Exception {
         byte[] zipBytes = buildZip();
-        MockMultipartFile zipFile = new MockMultipartFile("file", "project.zip", "application/zip", zipBytes);
+        MockMultipartFile zipFile = new MockMultipartFile("file", "my-service.zip", "application/zip", zipBytes);
 
         IndexRunResult result = uploadService.indexUploadedZip(zipFile);
 
         assertEquals(1, result.getSucceededFiles().size());
         assertTrue(result.getChunksWritten() > 0);
         assertEquals(0, result.getFailedFiles().size());
+        assertEquals("my-service", result.getProject(), ".zip extension should be stripped from the project name");
     }
 
     @Test
-    void indexesUploadedFolderPreservingRelativePaths() throws Exception {
+    void indexesUploadedFolderIntoAProjectNamedAfterItsTopLevelFolder() throws Exception {
         MockMultipartFile file1 = new MockMultipartFile("files",
-                "com/example/util/MathUtils.java", "text/plain",
+                "my-app/com/example/util/MathUtils.java", "text/plain",
                 "package com.example.util;\npublic class MathUtils { public int sum() { return 1; } }".getBytes());
         MockMultipartFile file2 = new MockMultipartFile("files",
-                "README.md", "text/plain", "not java, should be ignored".getBytes());
+                "my-app/README.md", "text/plain", "not java, should be ignored".getBytes());
 
         IndexRunResult result = uploadService.indexUploadedFolder(
                 new org.springframework.web.multipart.MultipartFile[]{file1, file2});
 
         assertEquals(1, result.getSucceededFiles().size());
-        assertEquals("com/example/util/MathUtils.java", result.getSucceededFiles().get(0));
+        assertEquals("my-app/com/example/util/MathUtils.java", result.getSucceededFiles().get(0));
         assertTrue(result.getChunksWritten() > 0);
+        assertEquals("my-app", result.getProject(), "project name should be the folder the user actually selected");
+    }
+
+    @Test
+    void twoUploadedProjectsDoNotMixInTheirOkfStores() throws Exception {
+        MockMultipartFile fileA = new MockMultipartFile("file", "project-a.zip", "application/zip", buildZip("A"));
+        MockMultipartFile fileB = new MockMultipartFile("file", "project-b.zip", "application/zip", buildZip("B"));
+
+        uploadService.indexUploadedZip(fileA);
+        uploadService.indexUploadedZip(fileB);
+
+        var chunksInA = okfReader.readAll("project-a");
+        var chunksInB = okfReader.readAll("project-b");
+
+        assertEquals(1, chunksInA.size());
+        assertEquals(1, chunksInB.size());
+        assertTrue(chunksInA.get(0).text().contains("class A"));
+        assertTrue(chunksInB.get(0).text().contains("class B"));
     }
 
     @Test
@@ -86,10 +111,14 @@ class UploadServiceTest {
     }
 
     private byte[] buildZip() throws Exception {
+        return buildZip("Foo");
+    }
+
+    private byte[] buildZip(String className) throws Exception {
         var baos = new java.io.ByteArrayOutputStream();
         try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("com/example/Foo.java"));
-            zos.write("package com.example;\npublic class Foo { public void bar() {} }".getBytes());
+            zos.putNextEntry(new ZipEntry("com/example/" + className + ".java"));
+            zos.write(("package com.example;\npublic class " + className + " { public void bar() {} }").getBytes());
             zos.closeEntry();
         }
         return baos.toByteArray();

@@ -5,16 +5,17 @@ import com.codeview.app.okf.OkfReader;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 
 /**
  * Builds the developer-facing dependency flow graph: one node per chunk
  * (class or method), one edge per resolved dependency link. Matching logic
- * mirrors LinkGraphWalker (Architecture Plan §11) — deterministic string
- * matching against chunk names/paths, no model call.
+ * mirrors {@link com.codeview.app.promptfilter.LinkGraphWalker}
+ * (Architecture Plan §11) — deterministic string matching against chunk
+ * names/paths, no model call — run across every chunk instead of a one-hop
+ * walk from a single prompt match.
  */
 @Service
 public class FlowGraphService {
@@ -25,33 +26,39 @@ public class FlowGraphService {
         this.okfReader = okfReader;
     }
 
-    public FlowGraph buildGraph() throws IOException {
-        List<ChunkRecord> chunks = okfReader.readAll();
+    /** Reads every indexed chunk and builds the full node/edge graph from their dependency fields. */
+    public FlowGraph buildGraph(String project) throws IOException {
+        List<ChunkRecord> chunks = okfReader.readAll(project);
+        return new FlowGraph(buildNodes(chunks), buildEdges(chunks));
+    }
 
-        List<FlowGraph.FlowNode> nodes = new ArrayList<>();
-        Set<String> seenIds = new LinkedHashSet<>();
-        for (ChunkRecord chunk : chunks) {
-            if (seenIds.add(chunk.chunkId())) {
-                nodes.add(new FlowGraph.FlowNode(chunk.chunkId(), chunk.name(), chunk.astNode(), chunk.filePath()));
-            }
-        }
+    /** One node per distinct chunk ID — de-duplicated via a LinkedHashMap keyed by chunk_id, preserving first-seen order. */
+    private List<FlowGraph.FlowNode> buildNodes(List<ChunkRecord> chunks) {
+        Map<String, FlowGraph.FlowNode> nodesById = new LinkedHashMap<>();
+        chunks.forEach(chunk -> nodesById.putIfAbsent(chunk.chunkId(),
+                new FlowGraph.FlowNode(chunk.chunkId(), chunk.name(), chunk.astNode(), chunk.filePath())));
+        return List.copyOf(nodesById.values());
+    }
 
-        List<FlowGraph.FlowEdge> edges = new ArrayList<>();
-        for (ChunkRecord chunk : chunks) {
-            for (String dep : chunk.dependencies()) {
-                for (ChunkRecord candidate : chunks) {
-                    if (candidate.chunkId().equals(chunk.chunkId())) {
-                        continue; // no self-loops
-                    }
-                    boolean linked = dep.endsWith(candidate.name())
-                            || candidate.filePath().contains(dep.replace('.', '/'));
-                    if (linked) {
-                        edges.add(new FlowGraph.FlowEdge(chunk.chunkId(), candidate.chunkId()));
-                    }
-                }
-            }
-        }
+    /** One edge per (chunk, dependency, resolved target) triple — every chunk checked against every other chunk. */
+    private List<FlowGraph.FlowEdge> buildEdges(List<ChunkRecord> chunks) {
+        return chunks.stream()
+                .flatMap(chunk -> edgesFrom(chunk, chunks))
+                .toList();
+    }
 
-        return new FlowGraph(nodes, edges);
+    /** Edges originating from one chunk: one per dependency string that resolves to another chunk in the set. */
+    private java.util.stream.Stream<FlowGraph.FlowEdge> edgesFrom(ChunkRecord source, List<ChunkRecord> allChunks) {
+        return source.dependencies().stream()
+                .flatMap(dependency -> allChunks.stream()
+                        .filter(candidate -> !candidate.chunkId().equals(source.chunkId()))
+                        .filter(candidate -> resolves(dependency, candidate))
+                        .map(candidate -> new FlowGraph.FlowEdge(source.chunkId(), candidate.chunkId())));
+    }
+
+    /** True if a dependency string plausibly refers to the candidate chunk, by name or by package-path containment. */
+    private boolean resolves(String dependency, ChunkRecord candidate) {
+        return dependency.endsWith(candidate.name())
+                || candidate.filePath().contains(dependency.replace('.', '/'));
     }
 }

@@ -5,6 +5,7 @@ import com.codeview.app.config.CodeViewProperties;
 import com.codeview.app.model.ChunkRecord;
 import com.codeview.app.model.IndexRunResult;
 import com.codeview.app.okf.OkfWriter;
+import com.codeview.app.project.ProjectNameResolver;
 import com.codeview.app.source.ResolvedSource;
 import com.codeview.app.source.SourceResolver;
 import org.slf4j.Logger;
@@ -25,9 +26,16 @@ import java.util.concurrent.Future;
  * OKF file names), so a retried worker can safely re-write without
  * duplicating anything.
  *
- * The source location can be a directory, a .zip archive, or a single .java
- * file — SourceResolver normalizes all three into the same file list before
- * this class does anything else.
+ * <p>The source location can be a directory, a .zip archive, or a single
+ * .java file — {@link SourceResolver} normalizes all three into the same
+ * file list before this class does anything else.
+ *
+ * <p><b>Project-scoped (this build):</b> every run indexes into one named
+ * project's OKF subdirectory, keeping multiple indexed codebases from mixing
+ * together. {@link #indexSource} derives the project name automatically from
+ * the source path; {@link #indexSourceWithProject} lets a caller (e.g.
+ * {@code UploadService}, which knows the browser's original filename rather
+ * than a server-side temp path) supply the name explicitly instead.
  */
 @Component
 public class ParallelIndexer {
@@ -39,44 +47,79 @@ public class ParallelIndexer {
     private final OkfWriter okfWriter;
     private final CodeViewProperties props;
     private final SourceResolver sourceResolver;
+    private final ProjectNameResolver projectNameResolver;
 
     public ParallelIndexer(ExecutorService executor, JavaAstChunker chunker,
                             OkfWriter okfWriter, CodeViewProperties props,
-                            SourceResolver sourceResolver) {
+                            SourceResolver sourceResolver, ProjectNameResolver projectNameResolver) {
         this.executor = executor;
         this.chunker = chunker;
         this.okfWriter = okfWriter;
         this.props = props;
         this.sourceResolver = sourceResolver;
+        this.projectNameResolver = projectNameResolver;
     }
 
-    /** Indexes the configured default source (codeview.repo-root). */
+    /** Indexes the configured default source (codeview.repo-root), deriving its project name automatically. */
     public IndexRunResult indexAll() throws Exception {
         return indexSource(props.getRepoRoot());
     }
 
     /**
      * Indexes an explicitly given source path — folder, .zip, or single
-     * .java file — overriding the configured default for this one run.
+     * .java file — deriving the project name from that path (last path
+     * segment, `.zip` extension stripped).
      */
     public IndexRunResult indexSource(String rawSourcePath) throws Exception {
-        IndexRunResult result = new IndexRunResult();
+        String project = projectNameResolver.fromSourcePath(rawSourcePath);
+        return indexSourceWithProject(rawSourcePath, project);
+    }
 
-        ResolvedSource resolved;
-        try {
-            resolved = sourceResolver.resolve(rawSourcePath);
-        } catch (IllegalArgumentException e) {
-            log.warn("Cannot index {}: {}", rawSourcePath, e.getMessage());
-            result.addFailure(rawSourcePath, e.getMessage(), 1);
-            return result;
+    /**
+     * Indexes a source path into an explicitly named project, bypassing
+     * automatic name derivation — used when the caller already knows the
+     * "real" name (e.g. the browser's original upload filename) and the
+     * source path itself is just a server-side temp location that wouldn't
+     * make a meaningful project name on its own.
+     */
+    public IndexRunResult indexSourceWithProject(String rawSourcePath, String project) throws Exception {
+        ResolvedSource resolved = resolveOrRecordFailure(rawSourcePath, project);
+        if (resolved == null) {
+            IndexRunResult failed = new IndexRunResult();
+            failed.setProject(project);
+            failed.addFailure(rawSourcePath, "Could not resolve source", 1);
+            return failed;
         }
 
-        log.info("Indexing {} file(s) from {} (source type: {})",
-                resolved.javaFiles().size(), rawSourcePath, resolved.type());
+        log.info("Indexing {} file(s) from {} into project '{}' (source type: {})",
+                resolved.javaFiles().size(), rawSourcePath, project, resolved.type());
+
+        IndexRunResult result = indexResolvedFiles(resolved, project);
+        result.setProject(project);
+
+        if (resolved.temporary()) {
+            sourceResolver.cleanupIfTemporary(resolved);
+        }
+        return result;
+    }
+
+    /** Resolves the source path, returning null (rather than throwing) if resolution fails, so the caller can build a proper failure result. */
+    private ResolvedSource resolveOrRecordFailure(String rawSourcePath, String project) {
+        try {
+            return sourceResolver.resolve(rawSourcePath);
+        } catch (Exception e) {
+            log.warn("Cannot index {} into project '{}': {}", rawSourcePath, project, e.getMessage());
+            return null;
+        }
+    }
+
+    /** Submits one chunking task per file to the worker pool and collects every outcome into one IndexRunResult. */
+    private IndexRunResult indexResolvedFiles(ResolvedSource resolved, String project) throws Exception {
+        IndexRunResult result = new IndexRunResult();
 
         List<Future<FileOutcome>> futures = resolved.javaFiles().stream()
                 .map(file -> executor.submit((Callable<FileOutcome>) () ->
-                        indexOneFileWithRetry(resolved.effectiveRoot(), file)))
+                        indexOneFileWithRetry(resolved.effectiveRoot(), file, project)))
                 .toList();
 
         for (Future<FileOutcome> future : futures) {
@@ -87,15 +130,11 @@ public class ParallelIndexer {
                 result.addFailure(outcome.filePath(), outcome.failureReason(), outcome.attempts());
             }
         }
-
-        if (resolved.temporary()) {
-            sourceResolver.cleanupIfTemporary(resolved);
-        }
-
         return result;
     }
 
-    private FileOutcome indexOneFileWithRetry(Path effectiveRoot, Path file) {
+    /** Chunks and writes one file, retrying up to codeview.max-retries times on failure before giving up on it. */
+    private FileOutcome indexOneFileWithRetry(Path effectiveRoot, Path file, String project) {
         String relativePath = effectiveRoot.relativize(file).toString().replace('\\', '/');
         int attempts = 0;
         Exception lastError = null;
@@ -105,12 +144,12 @@ public class ParallelIndexer {
             try {
                 List<ChunkRecord> chunks = chunker.chunk(file, relativePath);
                 for (ChunkRecord chunk : chunks) {
-                    okfWriter.write(chunk);
+                    okfWriter.write(chunk, project);
                 }
                 return FileOutcome.success(relativePath, chunks.size());
             } catch (Exception e) {
                 lastError = e;
-                log.warn("Chunking attempt {} failed for {}: {}", attempts, relativePath, e.getMessage());
+                log.warn("Chunking attempt {} failed for {} (project '{}'): {}", attempts, relativePath, project, e.getMessage());
             }
         }
         return FileOutcome.failure(relativePath,
@@ -128,4 +167,3 @@ public class ParallelIndexer {
         }
     }
 }
-

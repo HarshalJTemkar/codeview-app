@@ -6,18 +6,19 @@ import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParseResult;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.ImportDeclaration;
+import com.github.javaparser.ast.Node;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
-import com.github.javaparser.ast.ImportDeclaration;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Structure-aware chunker for Java source: parses an AST via JavaParser and
@@ -25,24 +26,20 @@ import java.util.stream.Collectors;
  * source doc's "self-contained, semantically coherent" chunk goal (functions,
  * classes) for the Java-first scope confirmed for this build.
  *
- * NOTE: the source design doc specifies Tree-sitter. JavaParser is used here
- * instead because Tree-sitter's Java grammar has no straightforward Maven
- * Central artifact to depend on — this is a stated deviation, not a silent
- * substitution. A fixed-line/brace fallback (§ "Language-Agnostic vs
- * Language-Aware" in the source doc) is not implemented in this build; only
- * Java is in scope per your confirmed decision.
+ * <p><b>Deviation from the source design doc:</b> it specifies Tree-sitter.
+ * JavaParser is used here instead because Tree-sitter's Java grammar has no
+ * straightforward Maven Central artifact to depend on — a stated deviation,
+ * not a silent substitution. A fixed-line/brace fallback for unsupported
+ * languages is not implemented; only Java is in scope per your confirmed
+ * decision.
  *
- * BUG FIX: earlier versions of this class used StaticJavaParser.parse(),
- * which defaults to an older language level and rejected records, pattern-
- * matching instanceof, and text blocks — exactly the Java 21 features this
- * project's own source uses, which is why running CodeView against itself
- * failed on nearly every file. Fixed by building a dedicated JavaParser
- * instance per call with LanguageLevel.BLEEDING_EDGE (the newest feature set
- * the JavaParser release supports), rather than relying on a default. This
- * also sidesteps StaticJavaParser's shared mutable configuration, which is
- * a real concern under the parallel worker pool (Architecture Plan §12) —
- * each chunk() call now gets its own JavaParser instance instead of
- * contending over global static state.
+ * <p><b>Bug fix (this build):</b> earlier versions used {@code
+ * StaticJavaParser.parse()}, whose default language level rejects records,
+ * pattern-matching {@code instanceof}, and text blocks. Fixed by giving each
+ * call its own {@link JavaParser} configured with {@code BLEEDING_EDGE},
+ * which also removes the thread-safety risk of relying on
+ * {@code StaticJavaParser}'s shared static configuration under the parallel
+ * worker pool (Architecture Plan §12).
  */
 @Component
 public class JavaAstChunker {
@@ -56,74 +53,130 @@ public class JavaAstChunker {
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE);
     }
 
+    /**
+     * Parses one Java source file and returns one chunk per class/interface
+     * declaration plus one chunk per method within each of those classes.
+     *
+     * @param javaFile     absolute path to the file on disk
+     * @param relativePath path relative to the source root, stored as each
+     *                     chunk's {@code file_path} and used to rebuild the
+     *                     directory/file/symbol tree later
+     */
     public List<ChunkRecord> chunk(Path javaFile, String relativePath) throws IOException {
+        CompilationUnit compilationUnit = parse(javaFile, relativePath);
+        List<String> imports = extractImportNames(compilationUnit);
+        String lastModified = readLastModified(javaFile);
+
+        return compilationUnit.findAll(ClassOrInterfaceDeclaration.class).stream()
+                .flatMap(classDecl -> chunkClassAndItsMethods(classDecl, relativePath, imports, lastModified))
+                .toList();
+    }
+
+    /**
+     * Parses raw file content into a JavaParser AST, using a fresh {@link
+     * JavaParser} instance per call (see class Javadoc for why this isn't
+     * {@code StaticJavaParser}). Throws with the parser's own problem list
+     * attached rather than swallowing the detail — a caller retrying this
+     * file needs to know *why* it failed, not just that it did.
+     */
+    private CompilationUnit parse(Path javaFile, String relativePath) throws IOException {
         String source = Files.readString(javaFile);
-
         JavaParser parser = new JavaParser(parserConfig);
-        ParseResult<CompilationUnit> parseResult = parser.parse(source);
+        ParseResult<CompilationUnit> result = parser.parse(source);
 
-        if (!parseResult.isSuccessful() || parseResult.getResult().isEmpty()) {
-            String problems = parseResult.getProblems().stream()
+        if (!result.isSuccessful() || result.getResult().isEmpty()) {
+            String problems = result.getProblems().stream()
                     .map(Object::toString)
                     .collect(Collectors.joining("; "));
             throw new IOException("Failed to parse " + relativePath + ": " + problems);
         }
-        CompilationUnit cu = parseResult.getResult().get();
-
-        String lastModified = Instant.ofEpochMilli(Files.getLastModifiedTime(javaFile).toMillis()).toString();
-
-        List<String> imports = new ArrayList<>();
-        for (ImportDeclaration imp : cu.getImports()) {
-            imports.add(imp.getNameAsString());
-        }
-
-        List<ChunkRecord> chunks = new ArrayList<>();
-
-        for (ClassOrInterfaceDeclaration cls : cu.findAll(ClassOrInterfaceDeclaration.class)) {
-            chunks.add(buildChunk(cls.toString(), relativePath, "ClassOrInterfaceDeclaration",
-                    cls.getNameAsString(), imports,
-                    cls.getBegin().map(p -> p.line).orElse(0),
-                    cls.getEnd().map(p -> p.line).orElse(0),
-                    lastModified));
-
-            for (MethodDeclaration method : cls.findAll(MethodDeclaration.class)) {
-                chunks.add(buildChunk(method.toString(), relativePath, "MethodDeclaration",
-                        method.getNameAsString(), imports,
-                        method.getBegin().map(p -> p.line).orElse(0),
-                        method.getEnd().map(p -> p.line).orElse(0),
-                        lastModified));
-            }
-        }
-
-        return chunks;
+        return result.getResult().get();
     }
 
-    private ChunkRecord buildChunk(String text, String filePath, String astNode, String name,
-                                    List<String> dependencies, int startLine, int endLine,
-                                    String lastModified) {
+    /** Extracts every import's fully-qualified name, in source order, as plain strings. */
+    private List<String> extractImportNames(CompilationUnit compilationUnit) {
+        return compilationUnit.getImports().stream()
+                .map(ImportDeclaration::getNameAsString)
+                .toList();
+    }
+
+    /** Reads a file's last-modified timestamp as an ISO-8601 string, for the chunk's `last_modified` field. */
+    private String readLastModified(Path file) throws IOException {
+        return Instant.ofEpochMilli(Files.getLastModifiedTime(file).toMillis()).toString();
+    }
+
+    /**
+     * Produces one chunk for the class/interface itself, followed by one
+     * chunk per method declared directly on it. Returned as a stream so
+     * {@link #chunk} can flatMap across every class in the file without an
+     * intermediate mutable list per class.
+     */
+    private Stream<ChunkRecord> chunkClassAndItsMethods(ClassOrInterfaceDeclaration classDecl,
+                                                          String relativePath, List<String> imports,
+                                                          String lastModified) {
+        ChunkRecord classChunk = toChunkRecord(classDecl, "ClassOrInterfaceDeclaration",
+                classDecl.getNameAsString(), relativePath, imports, lastModified);
+
+        Stream<ChunkRecord> methodChunks = classDecl.findAll(MethodDeclaration.class).stream()
+                .map(method -> toChunkRecord(method, "MethodDeclaration",
+                        method.getNameAsString(), relativePath, imports, lastModified));
+
+        return Stream.concat(Stream.of(classChunk), methodChunks);
+    }
+
+    /** Builds one ChunkRecord from an AST node, hashing its source text and deriving its static tags. */
+    private ChunkRecord toChunkRecord(Node node, String astNode, String name, String relativePath,
+                                       List<String> imports, String lastModified) {
+        String text = node.toString();
         String hash = hasher.hashContent(text);
         String chunkId = hash.substring(0, 16);
-        List<String> tags = deriveStaticTags(text);
-        return new ChunkRecord(chunkId, filePath, "java", startLine, endLine, astNode, name,
-                dependencies, tags, text, hash, lastModified);
+
+        return ChunkRecord.builder()
+                .chunkId(chunkId)
+                .filePath(relativePath)
+                .language("java")
+                .lines(startLineOf(node), endLineOf(node))
+                .astNode(astNode)
+                .name(name)
+                .dependencies(imports)
+                .tags(deriveStaticTags(text))
+                .text(text)
+                .hash(hash)
+                .lastModified(lastModified)
+                .build();
+    }
+
+    private int startLineOf(Node node) {
+        return node.getBegin().map(p -> p.line).orElse(0);
+    }
+
+    private int endLineOf(Node node) {
+        return node.getEnd().map(p -> p.line).orElse(0);
     }
 
     /**
      * Tags derived only from static signals (Architecture Plan §2: no LLM/embedding
      * clustering) — simple structural pattern checks against the chunk text.
+     * Each tag is independent, so this reads as a small pipeline of
+     * predicate-checks rather than a chain of if-statements.
      */
     private List<String> deriveStaticTags(String text) {
-        List<String> tags = new ArrayList<>();
-        if (text.contains("for (") || text.contains("for(") || text.contains("while (") || text.contains("while(")) {
-            tags.add("has-loop");
+        record TagRule(String tag, java.util.function.Predicate<String> matches) {
         }
-        if (text.contains("System.out") || text.contains("InputStream") || text.contains("OutputStream")
-                || text.contains("Files.") || text.contains("Reader") || text.contains("Writer")) {
-            tags.add("has-io-call");
-        }
-        if (text.contains("throw ") || text.contains("catch (") || text.contains("catch(")) {
-            tags.add("has-error-handling");
-        }
-        return tags;
+
+        List<TagRule> rules = List.of(
+                new TagRule("has-loop", t -> t.contains("for (") || t.contains("for(")
+                        || t.contains("while (") || t.contains("while(")),
+                new TagRule("has-io-call", t -> t.contains("System.out") || t.contains("InputStream")
+                        || t.contains("OutputStream") || t.contains("Files.")
+                        || t.contains("Reader") || t.contains("Writer")),
+                new TagRule("has-error-handling", t -> t.contains("throw ")
+                        || t.contains("catch (") || t.contains("catch("))
+        );
+
+        return rules.stream()
+                .filter(rule -> rule.matches().test(text))
+                .map(TagRule::tag)
+                .toList();
     }
 }

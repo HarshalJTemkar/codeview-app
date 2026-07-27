@@ -10,14 +10,16 @@
   function renderResult(result) {
     const succeeded = result.succeededFiles ? result.succeededFiles.length : 0;
     const failed = result.failedFiles ? result.failedFiles.length : 0;
-    let text = 'Indexed ' + succeeded + ' file(s), ' + result.chunksWritten + ' chunk(s) written.';
+    let text = 'Indexed into project "' + result.project + '": ' + succeeded + ' file(s), '
+        + result.chunksWritten + ' chunk(s) written.';
     if (failed > 0) {
       text += '\n\n' + failed + ' file(s) failed:\n';
       result.failedFiles.forEach((f) => {
         text += '  - ' + f.filePath + ': ' + f.reason + ' (after ' + f.attempts + ' attempt(s))\n';
       });
     }
-    text += '\n\nView the result: /ui/tree';
+    text += '\n\nView it: /ui/tree?project=' + encodeURIComponent(result.project)
+        + '  or  /ui/flow?project=' + encodeURIComponent(result.project);
     showStatus(text, failed > 0 && succeeded === 0);
   }
 

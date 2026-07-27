@@ -74,6 +74,41 @@ Both upload paths land in the exact same `ParallelIndexer.indexSource()` call th
 `POST /mcp/code/reindex_all` uses — uploading is just another way of pointing at a source, not a
 separate indexing implementation.
 
+## Multi-project isolation
+
+Every indexed source now lands in its own subdirectory under `codeview.okf-root`, named after the
+source itself:
+
+- `.zip` upload `my-service.zip` → `okf-store/my-service/`
+- Folder upload (browser picker selects `my-app/`) → `okf-store/my-app/`
+- `codeview.repo-root` or a `reindex_all` `sourcePath` pointing at `/path/to/some-service` →
+  `okf-store/some-service/`
+
+**Why this exists:** before this, every indexed source wrote into one flat `okf-store/` directory.
+Indexing a second project mixed its chunks in with the first — `OkfReader.readAll()` had no way to
+tell them apart, so the tree, flow graph, search, and prompt-filter were all silently working off a
+blended, wrong dataset the moment more than one project was ever indexed.
+
+**Reads now require a `project` parameter, explicitly, on every call** — `search`, `get_chunk`,
+`tree`, the UI's `/ui/api/tree` and `/ui/api/flow`, and `prompt_filter` all take one. This was a
+deliberate choice over two alternatives:
+- *Server remembers a "current" project* — rejected: global mutable state that races the moment two
+  callers (two browser tabs, two agents) are indexing or reading different projects at once.
+- *Merge everything into one aggregate view* — rejected: defeats the entire point of separating
+  projects in the first place.
+
+`GET /mcp/code/projects` (and `/ui/api/projects` for the UI's own use) lists what's actually been
+indexed, so a caller — or the tree/flow pages' project picker dropdown — can discover valid names
+rather than guessing. Every indexing response (`reindex_all`, both upload endpoints) includes a
+`project` field telling you exactly what name to use for the reads that follow.
+
+**Project names are sanitized**, not used raw: non-alphanumeric characters become dashes, leading
+dots are stripped, and — independently, as defense-in-depth rather than trusting the sanitizer
+alone — `ProjectStore` refuses to resolve any name that would still escape the OKF root once
+resolved. A deliberately malicious path like `../../etc/passwd` degrades safely to just its last
+path segment (`passwd`) before sanitization ever runs, since `Path.getFileName()` only ever looks
+at the final segment regardless of what precedes it.
+
 ## Fixed since the last handoff
 
 Two real bugs, found by actually running this against its own source and a folder upload:
@@ -90,6 +125,47 @@ Two real bugs, found by actually running this against its own source and a folde
   the same way (it's one opaque file) — `UploadController` now returns a clear, actionable error
   instead of a raw 500 if a zip is still too large, telling you to exclude `target/`/`.git/` before
   zipping.
+
+## Design patterns used, and where
+
+Applied where they genuinely fit the problem, not sprinkled in for their own sake — this build
+went through a deep refactor pass on the business-logic core (`chunker`, `promptfilter`, `flow`,
+`tree`); DTOs and controllers were left as they were, since they're already thin and single-purpose:
+
+- **Strategy + Chain of Responsibility** — `PromptMatchStrategy` is implemented by `StructuralMatcher`
+  and `KeywordMatcher`; `PromptFilterService` runs them as an explicit ordered chain, stopping at the
+  first one that matches (§11's confirmed "structural first, keyword fallback"). The chain order is
+  fixed in code, not left to Spring's ambient bean-injection order.
+- **Builder** — `ChunkRecord.Builder`. The record has 12 fields; the old call sites were positional
+  12-argument constructor calls, easy to get silently out of order. The builder makes each call site
+  named and order-independent.
+- **Factory-style dispatch** — `SourceResolver.resolve()` inspects the input and routes to
+  `resolveDirectory` / `resolveZip` / `resolveSingleFile`, each returning the same `ResolvedSource`
+  shape so nothing downstream needs to know which one ran.
+- **Repository-like access** — `OkfReader`/`OkfWriter` are the only components that touch the OKF
+  store directly; every other service (tree, flow, prompt-filter) goes through them rather than
+  reading files itself.
+
+**Method size / reuse:** the deep-refactor-pass files were split so each private method does one
+named thing — e.g. `JavaAstChunker.chunk()` is now `parse` → `extractImportNames` →
+`chunkClassAndItsMethods` → `toChunkRecord`, each with its own Javadoc, instead of one long method.
+`TreeService` is a deliberate exception: it's kept as a documented loop rather than forced into a
+stream pipeline, because folding chunks into a shared, growing parent/child map is inherently
+stateful — the class-level Javadoc explains why.
+
+**Streams/records/lambdas:** used throughout the refactored files where they read more clearly than
+a loop (see `FlowGraphService`, `LinkGraphWalker`, both matcher classes) — not applied
+indiscriminately where a loop is genuinely clearer (`TreeService`, as above).
+
+## Diagrams
+
+`docs/DIAGRAMS.md` has two Mermaid diagrams, both generated from the actual code (real `import`
+statements and real controller/service wiring), not drawn from memory:
+1. **Package dependency graph** — which package depends on which, and the regeneration command if
+   the code changes.
+2. **Whole-application architecture / request flow** — every caller, controller, service, and data
+   store, including where the "read-only against source" guarantee is structurally visible (nothing
+   points into the target-repo node).
 
 ## Requirements
 
@@ -143,19 +219,29 @@ after the source changes — there's no way to "watch" a zip's contents changing
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/mcp/code/search` | Keyword/structural lookup over OKF concept files |
-| GET | `/mcp/code/get_chunk/{chunkId}` | Fetch one chunk by ID |
-| GET | `/mcp/code/tree` | Directory → file → symbol tree |
-| POST | `/mcp/code/update_file` | Re-read + re-chunk one file (never applies a patch) |
-| POST | `/mcp/code/reindex_all` | Full parallel index — of `codeview.repo-root`, or an override `sourcePath` (directory, zip, or single file) |
-| POST | `/mcp/code/prompt_filter` | **The core feature** — see below |
+| GET | `/mcp/code/projects` | List every currently-indexed project's name |
+| POST | `/mcp/code/search` | Keyword/structural lookup — requires `project` in the body |
+| GET | `/mcp/code/get_chunk/{chunkId}` | Fetch one chunk by ID — requires `?project=` |
+| GET | `/mcp/code/tree` | Directory → file → symbol tree — requires `?project=` |
+| POST | `/mcp/code/update_file` | Re-read + re-chunk one file (never applies a patch); `project` optional, defaults to the one derived from `codeview.repo-root` |
+| POST | `/mcp/code/reindex_all` | Full parallel index — of `codeview.repo-root`, or an override `sourcePath` (directory, zip, or single file); project name is derived automatically, returned in the response |
+| POST | `/mcp/code/prompt_filter` | **The core feature** — requires `project` in the body — see below |
+
+### Example: full index and the project it lands in
+
+```bash
+curl -X POST http://localhost:8080/mcp/code/reindex_all
+# { "project": "sample-repo", "succeededFiles": [...], "chunksWritten": 3, ... }
+
+curl "http://localhost:8080/mcp/code/tree?project=sample-repo"
+```
 
 ### Example: prompt-time context filter
 
 ```bash
 curl -X POST http://localhost:8080/mcp/code/prompt_filter \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "why is the sum method in MathUtils slow"}'
+  -d '{"prompt": "why is the sum method in MathUtils slow", "project": "sample-repo"}'
 ```
 
 Returns matched chunks (structural match on `sum`/`MathUtils`, then a one-hop link-graph walk),
@@ -182,7 +268,8 @@ src/main/java/com/codeview/app/
   chunker/       AST-based chunking (JavaParser)
   hash/          SHA-256 content hashing, Merkle aggregation
   source/        Resolves a directory, .zip, or single file into a walkable file list
-  okf/           OKF concept-file read/write (the "no RAG" knowledge store)
+  project/       Derives and validates the per-project OKF subdirectory name (multi-project isolation)
+  okf/           OKF concept-file read/write (the "no RAG" knowledge store), project-scoped
   tree/          Directory/file/symbol tree builder
   index/         Parallel first-time indexer, incremental re-index, file watcher
   promptfilter/  Structural match → keyword fallback → link-graph walk
